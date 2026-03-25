@@ -14,8 +14,6 @@ from datetime import datetime
 
 # 1896820725 天津股侠 2024-12-09T16:47:04
 
-DATABASE_PATH = './weibo/weibodata.db'
-
 # 如果日志文件夹不存在，则创建
 if not os.path.isdir("log/"):
     os.makedirs("log/")
@@ -34,6 +32,10 @@ def load_config():
 
 # 初始化时加载配置
 base_config = load_config()
+
+def get_database_path():
+    """获取SQLite数据库路径"""
+    return base_config.get("sqlite_db_path", "weibodata.db")
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False  # 确保JSON响应中的中文不会被转义
@@ -174,7 +176,7 @@ def get_task_status(task_id):
 @app.route('/weibos', methods=['GET'])
 def get_weibos():
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = sqlite3.connect(get_database_path())
         cursor = conn.cursor()
         # 按created_at倒序查询所有微博
         cursor.execute("SELECT * FROM weibo ORDER BY created_at DESC")
@@ -196,7 +198,7 @@ def get_weibos():
 @app.route('/weibos/<weibo_id>', methods=['GET'])
 def get_weibo_detail(weibo_id):
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = sqlite3.connect(get_database_path())
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM weibo WHERE id=?", (weibo_id,))
         columns = [column[0] for column in cursor.description]
