@@ -175,6 +175,7 @@ class Weibo(object):
         self.mongodb_URI = config.get("mongodb_URI")  # MongoDB数据库连接字符串，可以不填
         self.post_config = config.get("post_config")  # post_config，可以不填
         self.page_weibo_count = config.get("page_weibo_count")  # page_weibo_count，爬取一页的微博数，默认10页
+        self.sqlite_db_path = config.get("sqlite_db_path", "weibodata.db")  # SQLite数据库路径
         
         # 初始化 LLM 分析器
         self.llm_analyzer = LLMAnalyzer(config) if config.get("llm_config") else None
@@ -2656,7 +2657,7 @@ class Weibo(object):
         connection.commit()
 
     def get_sqlte_path(self):
-        return "./weibo/weibodata.db"
+        return self.sqlite_db_path
 
     def get_sqlite_create_sql(self):
         create_sql = """
