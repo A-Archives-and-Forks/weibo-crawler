@@ -109,6 +109,7 @@ class Weibo(object):
         self.comment_max_download_count = config[
             "comment_max_download_count"
         ]  # 如果设置了下评论，每条微博评论数会限制在这个值内
+        self.comment_pic_download = config.get("comment_pic_download", 0)  # 1代表下载评论图片,0代表不下载
         self.download_repost = config["download_repost"]  # 1代表下载转发,0代表不下载
         self.repost_max_download_count = config[
             "repost_max_download_count"
@@ -2492,7 +2493,7 @@ class Weibo(object):
         sqlite_comment["pic_url"] = ""
         if comment.get("pic"):
             sqlite_comment["pic_url"] = comment["pic"]["large"]["url"]
-        if sqlite_comment["pic_url"]:
+        if sqlite_comment["pic_url"] and self.comment_pic_download:
             pic_url = sqlite_comment["pic_url"]
 
             # 评论图片目录：weibo/<用户目录>/<用户昵称>_comments_img
