@@ -3,7 +3,8 @@ import const
 import logging
 import logging.config
 import os
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
 import sqlite3
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -38,8 +39,15 @@ def get_database_path():
     return base_config.get("sqlite_db_path", "weibodata.db")
 
 app = Flask(__name__)
-app.config['JSON_AS_ASCII'] = False  # 确保JSON响应中的中文不会被转义
+CORS(app)
+app.config['JSON_AS_ASCII'] = False
 app.config['JSONIFY_MIMETYPE'] = 'application/json;charset=utf-8'
+
+schedule_config = {
+    'enabled': False,
+    'interval': 10,
+    'next_run': None
+}
 
 # 添加线程池和任务状态跟踪
 executor = ThreadPoolExecutor(max_workers=1)  # 限制只有1个worker避免并发爬取
@@ -110,6 +118,10 @@ def run_refresh_task(task_id, user_id_list=None):
             if current_task_id == task_id:
                 current_task_id = None
             cleanup_old_tasks()  # 清理旧任务
+
+@app.route('/')
+def index():
+    return send_from_directory('frontend', 'index.html')
 
 @app.route('/refresh', methods=['POST'])
 def refresh():
@@ -214,30 +226,176 @@ def get_weibo_detail(weibo_id):
         logger.exception(e)
         return {"error": str(e)}, 500
 
+@app.route('/config/users', methods=['GET'])
+def get_user_list():
+    try:
+        user_id_list = base_config.get('user_id_list', [])
+        if isinstance(user_id_list, str):
+            if os.path.exists(user_id_list):
+                with open(user_id_list, 'r') as f:
+                    user_ids = [line.strip() for line in f if line.strip()]
+            else:
+                user_ids = []
+        else:
+            user_ids = user_id_list
+        
+        users = [{'id': uid, 'name': uid} for uid in user_ids]
+        return jsonify({'users': users}), 200
+    except Exception as e:
+        logger.exception(e)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/config/users', methods=['POST'])
+def add_user():
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'user_id is required'}), 400
+        
+        user_id_list = base_config.get('user_id_list', [])
+        if isinstance(user_id_list, str):
+            if os.path.exists(user_id_list):
+                with open(user_id_list, 'r') as f:
+                    user_ids = [line.strip() for line in f if line.strip()]
+            else:
+                user_ids = []
+        else:
+            user_ids = list(user_id_list)
+        
+        if user_id not in user_ids:
+            user_ids.append(user_id)
+            
+            user_id_file = base_config.get('user_id_list')
+            if isinstance(user_id_file, str) and os.path.exists(user_id_file):
+                with open(user_id_file, 'a') as f:
+                    f.write(f'\n{user_id}')
+            else:
+                base_config['user_id_list'] = user_ids
+        
+        return jsonify({'success': True, 'user_id': user_id}), 200
+    except Exception as e:
+        logger.exception(e)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/config/users/<user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    try:
+        user_id_list = base_config.get('user_id_list', [])
+        if isinstance(user_id_list, str):
+            if os.path.exists(user_id_list):
+                with open(user_id_list, 'r') as f:
+                    user_ids = [line.strip() for line in f if line.strip()]
+            else:
+                user_ids = []
+        else:
+            user_ids = list(user_id_list)
+        
+        if user_id in user_ids:
+            user_ids.remove(user_id)
+            
+            user_id_file = base_config.get('user_id_list')
+            if isinstance(user_id_file, str) and os.path.exists(user_id_file):
+                with open(user_id_file, 'w') as f:
+                    f.write('\n'.join(user_ids))
+            else:
+                base_config['user_id_list'] = user_ids
+        
+        return jsonify({'success': True}), 200
+    except Exception as e:
+        logger.exception(e)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/config/schedule', methods=['GET'])
+def get_schedule():
+    return jsonify(schedule_config), 200
+
+@app.route('/config/schedule', methods=['POST'])
+def update_schedule():
+    try:
+        data = request.get_json()
+        
+        if 'interval' in data:
+            schedule_config['interval'] = max(1, min(1440, int(data['interval'])))
+        
+        if 'enabled' in data:
+            schedule_config['enabled'] = bool(data['enabled'])
+        
+        if schedule_config['enabled']:
+            next_run = datetime.now().timestamp() + schedule_config['interval'] * 60
+            schedule_config['next_run'] = datetime.fromtimestamp(next_run).isoformat()
+        else:
+            schedule_config['next_run'] = None
+        
+        return jsonify(schedule_config), 200
+    except Exception as e:
+        logger.exception(e)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/stats', methods=['GET'])
+def get_stats():
+    try:
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM weibo")
+        total_weibos = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM weibo")
+        total_users = cursor.fetchone()[0]
+        
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute("SELECT COUNT(*) FROM weibo WHERE created_at LIKE ?", (f'{today}%',))
+        today_weibos = cursor.fetchone()[0]
+        
+        completed_tasks = sum(1 for t in tasks.values() if t['state'] == 'SUCCESS')
+        
+        conn.close()
+        
+        return jsonify({
+            'totalWeibos': total_weibos,
+            'totalUsers': total_users,
+            'todayWeibos': today_weibos,
+            'completedTasks': completed_tasks
+        }), 200
+    except Exception as e:
+        logger.exception(e)
+        return jsonify({
+            'totalWeibos': 0,
+            'totalUsers': 0,
+            'todayWeibos': 0,
+            'completedTasks': 0
+        }), 200
+
 def schedule_refresh():
     """定时刷新任务"""
     while True:
         try:
-            # 检查是否有运行中的任务
-            running_task_id, running_task = get_running_task()
-            if not running_task:
-                task_id = str(uuid.uuid4())
-                tasks[task_id] = {
-                    'state': 'PENDING',
-                    'progress': 0,
-                    'created_at': datetime.now().isoformat(),
-                    'user_id_list': base_config['user_id_list']  # 使用默认配置
-                }
-                with task_lock:
-                    global current_task_id
-                    current_task_id = task_id
-                executor.submit(run_refresh_task, task_id, base_config['user_id_list'])
-                logger.info(f"Scheduled task {task_id} started")
-            
-            time.sleep(600)  # 10分钟间隔
+            if schedule_config['enabled']:
+                running_task_id, running_task = get_running_task()
+                if not running_task:
+                    task_id = str(uuid.uuid4())
+                    tasks[task_id] = {
+                        'state': 'PENDING',
+                        'progress': 0,
+                        'created_at': datetime.now().isoformat(),
+                        'user_id_list': base_config['user_id_list']
+                    }
+                    with task_lock:
+                        global current_task_id
+                        current_task_id = task_id
+                    executor.submit(run_refresh_task, task_id, base_config['user_id_list'])
+                    logger.info(f"Scheduled task {task_id} started")
+                    
+                    next_run = datetime.now().timestamp() + schedule_config['interval'] * 60
+                    schedule_config['next_run'] = datetime.fromtimestamp(next_run).isoformat()
+                
+                time.sleep(schedule_config['interval'] * 60)
+            else:
+                time.sleep(60)
         except Exception as e:
             logger.exception("Schedule task error")
-            time.sleep(60)  # 发生错误时等待1分钟后重试
+            time.sleep(60)
 
 if __name__ == "__main__":
     # 启动定时任务线程
@@ -246,4 +404,4 @@ if __name__ == "__main__":
     
     logger.info("服务启动")
     # 启动Flask应用
-    app.run(debug=True, use_reloader=False)  # 关闭reloader避免启动两次
+    app.run(debug=True, use_reloader=False, port=8888)
