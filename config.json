@@ -1,6 +1,6 @@
 {
     "user_id_list": "user_id_list.txt", // 用户ID列表文件路径或用户ID数组，格式：每行一个用户ID，或 ["123456", "789012"]
-    "only_crawl_original": 1, // 是否只爬取原创微博 0 = 爬取全部（原创+转发），1 = 只爬取原创微博
+    "only_crawl_original": 0, // 是否只爬取原创微博 0 = 爬取全部（原创+转发），1 = 只爬取原创微博
     "since_date": "2026-01-01", // 开始爬取的时间范围（格式：YYYY-MM-DD），只爬取该日期之后发布的微博
     "end_date": "", // 截止爬取的时间范围（格式：YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS），为空则不限制，只爬取该日期之前发布的微博
     "start_page": 1, // 从第几页开始爬取，通常保持为1，断点续传时可调整
@@ -8,8 +8,7 @@
     "write_mode": [
         "markdown",
         "csv",
-        "json",
-        "sqlite"
+        "json"
     ], // 输出格式（可多选），可选项：csv, json, mysql, mongo, sqlite, post, markdown，示例：["markdown"] 或 ["markdown", "csv", "json"]
     "markdown_split_by": "day_by_month", // markdown文件分割方式，可选项：day（按天，平铺），day_by_month（按天，按月归档到子文件夹），month（按月），year（按年），all（所有数据在一个文件）
     "original_pic_download": 0, // 是否下载原创微博图片 0 = 不下载，1 = 下载
@@ -18,7 +17,7 @@
     "retweet_video_download": 0, // 是否下载转发微博视频 0 = 不下载，1 = 下载
     "original_live_photo_download": 0, // 是否下载原创微博Live Photo 0 = 不下载，1 = 下载
     "retweet_live_photo_download": 0, // 是否下载转发微博Live Photo 0 = 不下载，1 = 下载
-    "download_comment": 1, // 是否下载评论 0 = 不下载，1 = 下载
+    "download_comment": 0, // 是否下载评论 0 = 不下载，1 = 下载
     "comment_max_download_count": 100, // 单条微博最大评论下载数量， 仅当 download_comment = 1 时生效
     "comment_pic_download": 0, // 是否下载评论图片 0 = 不下载，1 = 下载
     "download_repost": 0, // 是否下载转发 0 = 不下载，1 = 下载
