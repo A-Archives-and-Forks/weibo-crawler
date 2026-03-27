@@ -14,7 +14,7 @@ from datetime import datetime
 
 # 1896820725 天津股侠 2024-12-09T16:47:04
 
-DATABASE_PATH = './weibo/weibodata.db'
+# DATABASE_PATH = './weibo/weibodata.db'
 
 # 如果日志文件夹不存在，则创建
 if not os.path.isdir("log/"):
@@ -34,6 +34,7 @@ def load_config():
 
 # 初始化时加载配置
 base_config = load_config()
+DATABASE_PATH = base_config.get("sqlite_db_path", "weibodata.db")
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False  # 确保JSON响应中的中文不会被转义
