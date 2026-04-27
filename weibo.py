@@ -20,6 +20,7 @@ from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from time import sleep
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 from requests.exceptions import RequestException
@@ -908,9 +909,9 @@ class Weibo(object):
 
     def get_pics(self, weibo_info):
         """获取微博原始图片url"""
+        pic_list = []
         if weibo_info.get("pics"):
             pic_info = weibo_info["pics"]
-            pic_list = []
             for pic in pic_info:
                 if not isinstance(pic, dict) or not pic.get('large'):
                     continue
@@ -924,10 +925,82 @@ class Weibo(object):
                     '/large/', url
                 )
                 pic_list.append(url)
-            pics = ",".join(pic_list)
-        else:
-            pics = ""
+
+        # 兼容正文里的“查看图片”类型链接，这类内容有时不落在 pics 数组里
+        for url in self.get_inline_image_urls(weibo_info):
+            if url not in pic_list:
+                pic_list.append(url)
+
+        pics = ",".join(pic_list) if pic_list else ""
         return pics
+
+    def normalize_inline_url(self, href):
+        """规范化正文中的跳转链接，优先还原 sinaurl 包裹的真实地址"""
+        if not href:
+            return ""
+
+        href = href.strip()
+        if href.startswith("//"):
+            return "https:" + href
+        if href.startswith("/"):
+            return "https://m.weibo.cn" + href
+
+        parsed = urlparse(href)
+        if "sinaurl" in parsed.path:
+            query = parse_qs(parsed.query)
+            target = query.get("u", [""])[0]
+            if target:
+                return unquote(target)
+        return href
+
+    def is_inline_image_url(self, url):
+        """判断正文中的链接是否直接指向图片资源"""
+        if not url:
+            return False
+        lower_url = url.lower().split("?")[0]
+        return lower_url.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+
+    def get_link_urls(self, selector):
+        """获取正文中的普通链接，保留真实 URL 以便后续检索"""
+        link_urls = []
+        for a in selector.xpath("//a"):
+            href = a.xpath("@href")
+            if not href:
+                continue
+
+            link_text = a.xpath("string(.)").strip()
+            raw_href = href[0]
+
+            # @用户/话题/页内跳转不作为普通链接保存
+            if raw_href.startswith("/n/") or raw_href.startswith("#"):
+                continue
+            if len(link_text) > 2 and link_text[0] == "#" and link_text[-1] == "#":
+                continue
+
+            normalized_url = self.normalize_inline_url(raw_href)
+            if not normalized_url or self.is_inline_image_url(normalized_url):
+                continue
+
+            if normalized_url not in link_urls:
+                link_urls.append(normalized_url)
+        return link_urls
+
+    def get_inline_image_urls(self, weibo_info):
+        """提取正文中以内嵌链接形式出现的图片 URL"""
+        text_body = weibo_info.get("text", "")
+        if not text_body:
+            return []
+
+        selector = etree.HTML(f"{text_body}<hr>" if text_body.isspace() else text_body)
+        image_urls = []
+        for a in selector.xpath("//a"):
+            href = a.xpath("@href")
+            if not href:
+                continue
+            normalized_url = self.normalize_inline_url(href[0])
+            if self.is_inline_image_url(normalized_url) and normalized_url not in image_urls:
+                image_urls.append(normalized_url)
+        return image_urls
 
 
     def get_live_photo_url(self, weibo_info):
@@ -1218,6 +1291,43 @@ class Weibo(object):
                 file_path = file_dir + os.sep + file_name
                 self.download_one_file(urls, file_path, file_type, w["id"], w["created_at"])
 
+    def get_download_file_names(self, file_type, urls, w):
+        """根据下载规则推导本地文件名，供 Markdown 链接使用"""
+        if not urls:
+            return []
+
+        file_prefix = w["created_at"][:11].replace("-", "") + "_" + str(w["id"])
+        file_names = []
+
+        if file_type == "img":
+            url_list = urls.split(",") if "," in urls else [urls]
+            for i, url in enumerate(url_list):
+                if not url:
+                    continue
+                index = url.rfind(".")
+                if len(url) - index >= 5:
+                    file_suffix = ".jpg"
+                else:
+                    file_suffix = url[index:]
+                if len(url_list) > 1:
+                    file_name = file_prefix + "_" + str(i + 1) + file_suffix
+                else:
+                    file_name = file_prefix + file_suffix
+                file_names.append(file_name)
+        elif file_type == "video" or file_type == "live_photo":
+            url_list = urls.split(";") if ";" in urls else [urls]
+            for i, url in enumerate(url_list):
+                if not url:
+                    continue
+                file_suffix = ".mov" if url.endswith(".mov") else ".mp4"
+                if len(url_list) > 1:
+                    file_name = file_prefix + "_" + str(i + 1) + file_suffix
+                else:
+                    file_name = file_prefix + file_suffix
+                file_names.append(file_name)
+
+        return file_names
+
     def download_files(self, file_type, weibo_type, wrote_count):
         try:
             describe = ""
@@ -1439,6 +1549,7 @@ class Weibo(object):
         weibo["pics"] = self.get_pics(weibo_info)
         weibo["video_url"] = self.get_video_url(weibo_info)  # 普通视频URL
         weibo["live_photo_url"] = self.get_live_photo_url(weibo_info)  # Live Photo视频URL
+        weibo["links"] = self.get_link_urls(selector)
         weibo["location"] = self.get_location(selector)
         weibo["created_at"] = weibo_info["created_at"]
         weibo["source"] = weibo_info["source"]
@@ -1952,6 +2063,8 @@ class Weibo(object):
             wb = OrderedDict()
             for k, v in w.items():
                 if k not in ["user_id", "screen_name", "retweet"]:
+                    if k == "links":
+                        continue
                     if "unicode" in str(type(v)):
                         v = v.encode("utf-8")
                     if k == "id":
@@ -1961,6 +2074,8 @@ class Weibo(object):
                 if w.get("retweet"):
                     wb["is_original"] = False
                     for k2, v2 in w["retweet"].items():
+                        if k2 == "links":
+                            continue
                         if "unicode" in str(type(v2)):
                             v2 = v2.encode("utf-8")
                         if k2 == "id":
@@ -2899,6 +3014,73 @@ class Weibo(object):
             # 下载图片
             self.download_one_file(pic_url, img_path, "img", weibo["id"], created_at)
 
+    def get_markdown_image_filenames(self, weibo, fallback_created_at=""):
+        """根据微博时间和图片数量生成 Markdown 中使用的本地图片文件名"""
+        created_at = weibo.get("created_at") or fallback_created_at
+        if not created_at or not weibo.get("pics"):
+            return []
+
+        try:
+            time_obj = datetime.strptime(created_at, DTFORMAT)
+            date_str = time_obj.strftime("%Y-%m-%d")
+            time_str = time_obj.strftime("%H:%M:%S")
+        except ValueError:
+            return []
+
+        pics = [pic for pic in weibo["pics"].split(",") if pic]
+        file_names = []
+        for i, _ in enumerate(pics):
+            base_filename = f"{date_str}_{time_str.replace(':', '-')}"
+            if len(pics) > 1:
+                file_names.append(f"{base_filename}_{i+1}.jpg")
+            else:
+                file_names.append(f"{base_filename}.jpg")
+        return file_names
+
+    def render_markdown_text(self, text, links=None, image_filenames=None):
+        """将正文中的占位词替换为 Markdown 链接或图片"""
+        if not text:
+            return "", list(links or []), list(image_filenames or [])
+
+        remaining_links = list(links or [])
+        remaining_images = list(image_filenames or [])
+        rendered_lines = []
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            replacement = line
+
+            if stripped == "网页链接" and remaining_links:
+                replacement = f"[网页链接]({remaining_links.pop(0)})"
+            elif stripped == "查看图片" and remaining_images:
+                replacement = f"![{stripped}](img/{remaining_images.pop(0)})"
+
+            rendered_lines.append(replacement)
+
+        rendered_text = "\n".join(rendered_lines).strip()
+        return rendered_text, remaining_links, remaining_images
+
+    def format_blockquote(self, text, label=None):
+        """将多行文本格式化为 Markdown 引用块"""
+        if not text:
+            return ""
+
+        lines = text.splitlines()
+        if not lines:
+            return ""
+
+        quoted_lines = []
+        first_line = lines[0]
+        if label:
+            quoted_lines.append(f"> {label}: {first_line}")
+        else:
+            quoted_lines.append(f"> {first_line}")
+
+        for line in lines[1:]:
+            quoted_lines.append(">" if not line else f"> {line}")
+
+        return "\n".join(quoted_lines)
+
     def generate_markdown_file(self, group_key, weibo_list):
         """生成单个markdown文件（增量模式）"""
         # 获取用户目录
@@ -2985,53 +3167,102 @@ class Weibo(object):
             if not self.only_crawl_original and w.get("retweet"):
                 # 原创部分
                 text = w.get("text", "").strip()
-                if text:
-                    new_md_content += f"{text}\n\n"
+                links = w.get("links") or []
+                image_filenames = self.get_markdown_image_filenames(w, created_at)
+                rendered_text, remaining_links, remaining_images = self.render_markdown_text(
+                    text, links, image_filenames
+                )
+
+                if rendered_text:
+                    new_md_content += f"{rendered_text}\n\n"
+
+                for link in remaining_links:
+                    new_md_content += f"[网页链接]({link})\n\n"
+
+                video_files = self.get_download_file_names(
+                    "video", w.get("video_url", ""), w
+                )
+                for idx, file_name in enumerate(video_files, start=1):
+                    label = "视频" if len(video_files) == 1 else f"视频 {idx}"
+                    new_md_content += f"[{label}](原创微博视频/{file_name})\n\n"
+
+                live_photo_files = self.get_download_file_names(
+                    "live_photo", w.get("live_photo_url", ""), w
+                )
+                for idx, file_name in enumerate(live_photo_files, start=1):
+                    label = "Live Photo" if len(live_photo_files) == 1 else f"Live Photo {idx}"
+                    new_md_content += f"[{label}](原创微博Live Photo视频/{file_name})\n\n"
+
+                for image_filename in remaining_images:
+                    new_md_content += f"![img](img/{image_filename})\n\n"
 
                 # 转发部分
                 retweet = w["retweet"]
                 retweet_text = retweet.get("text", "").strip()
-                if retweet_text:
-                    new_md_content += f"> 转发: {retweet_text}\n\n"
+                retweet_links = retweet.get("links") or []
+                retweet_image_filenames = self.get_markdown_image_filenames(
+                    retweet, created_at
+                )
+                rendered_retweet_text, remaining_retweet_links, remaining_retweet_images = (
+                    self.render_markdown_text(
+                        retweet_text, retweet_links, retweet_image_filenames
+                    )
+                )
 
-                # 转发微博图片（图片保存在父微博的月份文件夹中）
-                if retweet.get("pics"):
-                    pics = retweet["pics"].split(",")
-                    # 使用转发微博的时间作为文件名
-                    retweet_created_at = retweet.get("created_at", created_at)
-                    try:
-                        retweet_time_obj = datetime.strptime(retweet_created_at, DTFORMAT)
-                        retweet_date_str = retweet_time_obj.strftime("%Y-%m-%d")
-                        retweet_time_str = retweet_time_obj.strftime("%H:%M:%S")
-                    except ValueError:
-                        retweet_date_str = date_str
-                        retweet_time_str = time_str
+                quoted_retweet = self.format_blockquote(rendered_retweet_text, "转发")
+                if quoted_retweet:
+                    new_md_content += f"{quoted_retweet}\n\n"
 
-                    for i, pic_url in enumerate(pics):
-                        if pic_url:
-                            base_filename = f"{retweet_date_str}_{retweet_time_str.replace(':', '-')}"
-                            if len(pics) > 1:
-                                img_filename = f"{base_filename}_{i+1}.jpg"
-                            else:
-                                img_filename = f"{base_filename}.jpg"
-                            new_md_content += f"![image](img/{img_filename})\n\n"
+                for link in remaining_retweet_links:
+                    new_md_content += f"> [网页链接]({link})\n\n"
+
+                retweet_video_files = self.get_download_file_names(
+                    "video", retweet.get("video_url", ""), retweet
+                )
+                for idx, file_name in enumerate(retweet_video_files, start=1):
+                    label = "转发视频" if len(retweet_video_files) == 1 else f"转发视频 {idx}"
+                    new_md_content += f"> [{label}](转发微博视频/{file_name})\n\n"
+
+                retweet_live_photo_files = self.get_download_file_names(
+                    "live_photo", retweet.get("live_photo_url", ""), retweet
+                )
+                for idx, file_name in enumerate(retweet_live_photo_files, start=1):
+                    label = "转发Live Photo" if len(retweet_live_photo_files) == 1 else f"转发Live Photo {idx}"
+                    new_md_content += f"> [{label}](转发微博Live Photo视频/{file_name})\n\n"
+
+                for image_filename in remaining_retweet_images:
+                    new_md_content += f"> ![img](img/{image_filename})\n\n"
             else:
                 # 原创微博
                 text = w.get("text", "").strip()
-                if text:
-                    new_md_content += f"{text}\n\n"
+                links = w.get("links") or []
+                image_filenames = self.get_markdown_image_filenames(w, created_at)
+                rendered_text, remaining_links, remaining_images = self.render_markdown_text(
+                    text, links, image_filenames
+                )
 
-                # 原创微博图片
-                if w.get("pics"):
-                    pics = w["pics"].split(",")
-                    for i, pic_url in enumerate(pics):
-                        if pic_url:
-                            base_filename = f"{date_str}_{time_str.replace(':', '-')}"
-                            if len(pics) > 1:
-                                img_filename = f"{base_filename}_{i+1}.jpg"
-                            else:
-                                img_filename = f"{base_filename}.jpg"
-                            new_md_content += f"![image](img/{img_filename})\n\n"
+                if rendered_text:
+                    new_md_content += f"{rendered_text}\n\n"
+
+                for link in remaining_links:
+                    new_md_content += f"[网页链接]({link})\n\n"
+
+                video_files = self.get_download_file_names(
+                    "video", w.get("video_url", ""), w
+                )
+                for idx, file_name in enumerate(video_files, start=1):
+                    label = "视频" if len(video_files) == 1 else f"视频 {idx}"
+                    new_md_content += f"[{label}](原创微博视频/{file_name})\n\n"
+
+                live_photo_files = self.get_download_file_names(
+                    "live_photo", w.get("live_photo_url", ""), w
+                )
+                for idx, file_name in enumerate(live_photo_files, start=1):
+                    label = "Live Photo" if len(live_photo_files) == 1 else f"Live Photo {idx}"
+                    new_md_content += f"[{label}](原创微博Live Photo视频/{file_name})\n\n"
+
+                for image_filename in remaining_images:
+                    new_md_content += f"![img](img/{image_filename})\n\n"
 
             # 添加分隔线
             new_md_content += "---\n\n"
